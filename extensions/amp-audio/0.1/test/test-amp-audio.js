@@ -18,6 +18,7 @@ import {AmpAudio} from '../amp-audio';
 import {adopt} from '../../../../src/runtime';
 import {naturalDimensions_} from '../../../../src/layout';
 import {createIframePromise} from '../../../../testing/iframe';
+import * as sinon from 'sinon';
 require('../amp-audio');
 
 adopt(window);
@@ -74,7 +75,6 @@ describe('amp-audio', () => {
       src: 'https://origin.com/audio.mp3',
     }).then(a => {
       const audio = a.querySelector('audio');
-      expect(audio).to.be.an.instanceof(Element);
       expect(audio.tagName).to.equal('AUDIO');
       expect(audio.getAttribute('src'))
           .to.equal('https://origin.com/audio.mp3');
@@ -98,7 +98,6 @@ describe('amp-audio', () => {
         {tag: 'text', text: 'Unsupported.'},
     ]).then(a => {
       const audio = a.querySelector('audio');
-      expect(audio).to.be.an.instanceof(Element);
       expect(audio.tagName).to.equal('AUDIO');
       expect(a.getAttribute('width')).to.be.equal('503');
       expect(a.getAttribute('height')).to.be.equal('53');
@@ -156,7 +155,7 @@ describe('amp-audio', () => {
       return savedCreateElement.call(document, name);
     };
     const element = document.createElement('div');
-    element.toggleFallback = sinon.spy();
+    element.toggleFallback = sandbox.spy();
     const audio = new AmpAudio(element);
     const promise = audio.layoutCallback();
     document.createElement = savedCreateElement;

@@ -19,9 +19,13 @@ import {createIframePromise} from '../../testing/iframe';
 import {user} from '../../src/log';
 import {urlReplacementsFor} from '../../src/url-replacements';
 import {markElementScheduledForTesting} from '../../src/custom-element';
-import {installCidService} from '../../src/service/cid-impl';
+import {installCidService} from '../../extensions/amp-analytics/0.1/cid-impl';
 import {installViewerService} from '../../src/service/viewer-impl';
-import {installActivityService} from '../../src/service/activity-impl';
+import {installActivityService,} from
+    '../../extensions/amp-analytics/0.1/activity-impl';
+import {
+  installUrlReplacementsService,
+} from '../../src/service/url-replacements-impl';
 import {setCookie} from '../../src/cookies';
 import {parseUrl} from '../../src/url';
 
@@ -48,7 +52,7 @@ describe('UrlReplacements', () => {
     return createIframePromise().then(iframe => {
       iframe.doc.title = 'Pixel Test';
       const link = iframe.doc.createElement('link');
-      link.setAttribute('href', 'https://pinterest.com/pin1');
+      link.setAttribute('href', 'https://pinterest.com:8080/pin1');
       link.setAttribute('rel', 'canonical');
       iframe.doc.head.appendChild(link);
       if (withCid) {
@@ -60,6 +64,7 @@ describe('UrlReplacements', () => {
         installActivityService(iframe.win);
       }
       viewerService = installViewerService(iframe.win);
+      installUrlReplacementsService(iframe.win);
       replacements = urlReplacementsFor(iframe.win);
       return replacements;
     });
@@ -100,12 +105,18 @@ describe('UrlReplacements', () => {
 
   it('should replace CANONICAL_URL', () => {
     return expand('?href=CANONICAL_URL').then(res => {
-      expect(res).to.equal('?href=https%3A%2F%2Fpinterest.com%2Fpin1');
+      expect(res).to.equal('?href=https%3A%2F%2Fpinterest.com%3A8080%2Fpin1');
     });
   });
 
   it('should replace CANONICAL_HOST', () => {
     return expand('?host=CANONICAL_HOST').then(res => {
+      expect(res).to.equal('?host=pinterest.com%3A8080');
+    });
+  });
+
+  it('should replace CANONICAL_HOSTNAME', () => {
+    return expand('?host=CANONICAL_HOSTNAME').then(res => {
       expect(res).to.equal('?host=pinterest.com');
     });
   });
@@ -140,10 +151,23 @@ describe('UrlReplacements', () => {
     });
   });
 
+  it('should replace AMPDOC_HOSTNAME', () => {
+    return expand('?ref=AMPDOC_HOSTNAME').then(res => {
+      expect(res).to.not.match(/AMPDOC_HOSTNAME/);
+    });
+  });
+
   it('should replace SOURCE_URL and _HOST', () => {
     return expand('?url=SOURCE_URL&host=SOURCE_HOST').then(res => {
       expect(res).to.not.match(/SOURCE_URL/);
       expect(res).to.not.match(/SOURCE_HOST/);
+    });
+  });
+
+  it('should replace SOURCE_URL and _HOSTNAME', () => {
+    return expand('?url=SOURCE_URL&host=SOURCE_HOSTNAME').then(res => {
+      expect(res).to.not.match(/SOURCE_URL/);
+      expect(res).to.not.match(/SOURCE_HOSTNAME/);
     });
   });
 
@@ -232,7 +256,7 @@ describe('UrlReplacements', () => {
   it('should replace PAGE_LOAD_TIME if timing info is not available', () => {
     const win = getFakeWindow();
     win.complete = true;
-    return urlReplacementsFor(win).expand('?sh=PAGE_LOAD_TIME&s')
+    return installUrlReplacementsService(win).expand('?sh=PAGE_LOAD_TIME&s')
         .then(res => {
           expect(res).to.match(/sh=&s/);
         });
@@ -240,12 +264,39 @@ describe('UrlReplacements', () => {
 
   it('should replace PAGE_LOAD_TIME if available within a delay', () => {
     const win = getFakeWindow();
-    const urlReplacements = urlReplacementsFor(win);
+    const urlReplacements = installUrlReplacementsService(win);
     const validMetric = urlReplacements.expand('?sh=PAGE_LOAD_TIME&s');
     urlReplacements.win_.performance.timing.loadEventStart = 109;
     loadObservable.fire(document.createEvent('Event')); // Mimics load event.
     return validMetric.then(res => {
       expect(res).to.match(/sh=9&s/);
+    });
+  });
+
+  it('should replace NAV_REDIRECT_COUNT', () => {
+    return expand('?sh=NAV_REDIRECT_COUNT').then(res => {
+      expect(res).to.match(/sh=\d+/);
+    });
+  });
+
+  it('should replace NAV_TIMING', () => {
+    return expand('?a=NAV_TIMING(navigationStart)' +
+        '&b=NAV_TIMING(navigationStart,responseStart)').then(res => {
+          expect(res).to.match(/a=\d+&b=\d+/);
+        });
+  });
+
+  it('should replace NAV_TIMING when attribute names are invalid', () => {
+    return expand('?a=NAV_TIMING(invalid)&b=NAV_TIMING(invalid,invalid)' +
+        '&c=NAV_TIMING(navigationStart,invalid)' +
+        '&d=NAV_TIMING(invalid,responseStart)').then(res => {
+          expect(res).to.match(/a=&b=&c=&d=/);
+        });
+  });
+
+  it('should replace NAV_TYPE', () => {
+    return expand('?sh=NAV_TYPE').then(res => {
+      expect(res).to.match(/sh=\d+/);
     });
   });
 
@@ -343,7 +394,7 @@ describe('UrlReplacements', () => {
 
   it('should accept $expressions', () => {
     return expand('?href=$CANONICAL_URL').then(res => {
-      expect(res).to.equal('?href=https%3A%2F%2Fpinterest.com%2Fpin1');
+      expect(res).to.equal('?href=https%3A%2F%2Fpinterest.com%3A8080%2Fpin1');
     });
   });
 
@@ -356,13 +407,13 @@ describe('UrlReplacements', () => {
   it('should replace several substitutions', () => {
     return expand('?a=UNKNOWN&href=CANONICAL_URL&title=TITLE').then(res => {
       expect(res).to.equal('?a=UNKNOWN' +
-          '&href=https%3A%2F%2Fpinterest.com%2Fpin1' +
+          '&href=https%3A%2F%2Fpinterest.com%3A8080%2Fpin1' +
           '&title=Pixel%20Test');
     });
   });
 
   it('should replace new substitutions', () => {
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('ONE', () => 'a');
     expect(replacements.expand('?a=ONE')).to.eventually.equal('?a=a');
     replacements.set_('ONE', () => 'b');
@@ -373,7 +424,7 @@ describe('UrlReplacements', () => {
 
   it('should report errors & replace them with empty string (sync)', () => {
     const clock = sandbox.useFakeTimers();
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('ONE', () => {
       throw new Error('boom');
     });
@@ -386,7 +437,7 @@ describe('UrlReplacements', () => {
 
   it('should report errors & replace them with empty string (promise)', () => {
     const clock = sandbox.useFakeTimers();
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('ONE', () => {
       return Promise.reject(new Error('boom'));
     });
@@ -399,14 +450,14 @@ describe('UrlReplacements', () => {
   });
 
   it('should support positional arguments', () => {
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('FN', one => one);
     return expect(replacements.expand('?a=FN(xyz1)')).to
         .eventually.equal('?a=xyz1');
   });
 
   it('should support multiple positional arguments', () => {
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('FN', (one, two) => {
       return one + '-' + two;
     });
@@ -415,7 +466,7 @@ describe('UrlReplacements', () => {
   });
 
   it('should support multiple positional arguments with dots', () => {
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('FN', (one, two) => {
       return one + '-' + two;
     });
@@ -424,7 +475,7 @@ describe('UrlReplacements', () => {
   });
 
   it('should support promises as replacements', () => {
-    const replacements = urlReplacementsFor(window);
+    const replacements = installUrlReplacementsService(window);
     replacements.set_('P1', () => Promise.resolve('abc '));
     replacements.set_('P2', () => Promise.resolve('xyz'));
     replacements.set_('P3', () => Promise.resolve('123'));
@@ -537,7 +588,7 @@ describe('UrlReplacements', () => {
   it('should replace QUERY_PARAM with foo', () => {
     const win = getFakeWindow();
     win.location = parseUrl('https://example.com?query_string_param1=foo');
-    return urlReplacementsFor(win)
+    return installUrlReplacementsService(win)
       .expand('?sh=QUERY_PARAM(query_string_param1)&s')
       .then(res => {
         expect(res).to.match(/sh=foo&s/);
@@ -547,7 +598,7 @@ describe('UrlReplacements', () => {
   it('should replace QUERY_PARAM with ""', () => {
     const win = getFakeWindow();
     win.location = parseUrl('https://example.com');
-    return urlReplacementsFor(win)
+    return installUrlReplacementsService(win)
       .expand('?sh=QUERY_PARAM(query_string_param1)&s')
       .then(res => {
         expect(res).to.match(/sh=&s/);
@@ -557,11 +608,31 @@ describe('UrlReplacements', () => {
   it('should replace QUERY_PARAM with default_value', () => {
     const win = getFakeWindow();
     win.location = parseUrl('https://example.com');
-    return urlReplacementsFor(win)
+    return installUrlReplacementsService(win)
       .expand('?sh=QUERY_PARAM(query_string_param1,default_value)&s')
       .then(res => {
         expect(res).to.match(/sh=default_value&s/);
       });
+  });
+
+  it('should collect vars', () => {
+    const win = getFakeWindow();
+    win.location = parseUrl('https://example.com?p1=foo');
+    return installUrlReplacementsService(win)
+        .collectVars('?SOURCE_HOST&QUERY_PARAM(p1)&SIMPLE&FUNC&PROMISE', {
+          'SIMPLE': 21,
+          'FUNC': () => 22,
+          'PROMISE': () => Promise.resolve(23),
+        })
+        .then(res => {
+          expect(res).to.deep.equal({
+            'SOURCE_HOST': 'example.com',
+            'QUERY_PARAM(p1)': 'foo',
+            'SIMPLE': 21,
+            'FUNC': 22,
+            'PROMISE': 23,
+          });
+        });
   });
 
   describe('access values', () => {
@@ -589,7 +660,7 @@ describe('UrlReplacements', () => {
         link.setAttribute('rel', 'canonical');
         iframe.doc.head.appendChild(link);
 
-        const replacements = urlReplacementsFor(iframe.win);
+        const replacements = installUrlReplacementsService(iframe.win);
         replacements.getAccessService_ = () => {
           if (opt_disabled) {
             return Promise.resolve(null);

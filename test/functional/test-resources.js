@@ -21,6 +21,7 @@ import {
   TaskQueue_,
 } from '../../src/service/resources-impl';
 import {VisibilityState} from '../../src/service/viewer-impl';
+import {dev} from '../../src/log';
 import {layoutRectLtwh} from '../../src/layout-rect';
 import * as sinon from 'sinon';
 
@@ -126,6 +127,11 @@ describe('Resources', () => {
     expect(resources.calcTaskTimeout_(task_p0)).to.equal(0);
     expect(resources.calcTaskTimeout_(task_p1)).to.equal(0);
 
+    // Idle render penalty after first visible
+    resources.firstVisibleTime_ = 0;
+    expect(resources.calcTaskTimeout_(task_p0)).to.equal(0);
+    expect(resources.calcTaskTimeout_(task_p1)).to.equal(1000);
+
     // Hight priority task in pool
     resources.exec_.tasks_ = [task_p0];
     expect(resources.calcTaskTimeout_(task_p0)).to.equal(0);
@@ -178,6 +184,7 @@ describe('Resources', () => {
       getPriority: () => 1,
       startLayout: () => {},
       layoutScheduled: () => {},
+      getTaskId: () => 'resource#P',
     };
     resources.visible_ = false;
     sandbox.stub(resources.viewer_, 'getVisibilityState').returns(
@@ -212,6 +219,7 @@ describe('Resources', () => {
       getPriority: () => 1,
       startLayout: () => {},
       layoutScheduled: () => {},
+      getTaskId: () => 'resource#L',
     };
     resources.scheduleLayoutOrPreload_(resource, true);
     expect(resources.queue_.getSize()).to.equal(1);
@@ -248,6 +256,8 @@ describe('Resources schedulePause', () => {
           return true;
         },
       },
+      getPlaceholder() {
+      },
       pauseCallback() {
       },
       unlayoutCallback() {
@@ -255,6 +265,9 @@ describe('Resources schedulePause', () => {
       },
       unlayoutOnPause() {
         return false;
+      },
+      getPriority() {
+        return 0;
       },
     };
   }
@@ -322,6 +335,140 @@ describe('Resources schedulePause', () => {
 });
 
 
+describe('Resources schedulePreload', () => {
+
+  let sandbox;
+  let resources;
+  let parent;
+  let children;
+  let child0;
+  let child1;
+  let child2;
+  let placeholder;
+
+  function createElement() {
+    return {
+      tagName: 'amp-test',
+      isBuilt() {
+        return true;
+      },
+      isUpgraded() {
+        return true;
+      },
+      getAttribute() {
+        return null;
+      },
+      contains() {
+        return true;
+      },
+      classList: {
+        contains() {
+          return true;
+        },
+      },
+      getPlaceholder() {
+        return placeholder;
+      },
+      renderOutsideViewport() {
+        return false;
+      },
+      layoutCallback() {
+      },
+      pauseCallback() {
+      },
+      unlayoutCallback() {
+        return false;
+      },
+      unlayoutOnPause() {
+        return false;
+      },
+      getPriority() {
+        return 0;
+      },
+    };
+  }
+
+  function createElementWithResource(id) {
+    const element = createElement();
+    const resource = new Resource(id, element, resources);
+    resource.state_ = ResourceState_.READY_FOR_LAYOUT;
+    resource.element['__AMP__RESOURCE'] = resource;
+    resource.measure = sandbox.spy();
+    resource.isDisplayed = () => true;
+    resource.isInViewport = () => true;
+    return [element, resource];
+  }
+
+  beforeEach(() => {
+    sandbox = sinon.sandbox.create();
+    resources = new Resources(window);
+    const parentTuple = createElementWithResource(1);
+    parent = parentTuple[0];
+    placeholder = document.createElement('div');
+    child0 = document.createElement('div');
+    child1 = createElementWithResource(2)[0];
+    child2 = createElementWithResource(3)[0];
+    children = [child0, child1, child2];
+  });
+
+  afterEach(() => {
+    sandbox.restore();
+  });
+
+  it('should not throw with a single element', () => {
+    expect(() => {
+      resources.schedulePreload(parent, child1);
+    }).to.not.throw();
+  });
+
+  it('should not throw with an array of elements', () => {
+    expect(() => {
+      resources.schedulePreload(parent, [child1, child2]);
+    }).to.not.throw();
+  });
+
+  it('should be ok with non amp children', () => {
+    expect(() => {
+      resources.schedulePreload(parent, children);
+    }).to.not.throw();
+  });
+
+  it('should schedule on custom element with multiple children', () => {
+    const stub1 = sandbox.stub(resources, 'schedule_');
+    resources.schedulePreload(parent, children);
+    expect(stub1.called).to.be.true;
+    expect(stub1.callCount).to.be.equal(2);
+  });
+
+  it('should schedule on nested custom element placeholder', () => {
+    const stub1 = sandbox.stub(resources, 'schedule_');
+
+    const placeholder1 = createElementWithResource(4)[0];
+    child1.getPlaceholder = () => placeholder1;
+
+    const placeholder2 = createElementWithResource(5)[0];
+    child2.getPlaceholder = () => placeholder2;
+
+    resources.schedulePreload(parent, children);
+    expect(stub1.called).to.be.true;
+    expect(stub1.callCount).to.be.equal(4);
+  });
+
+  it('should schedule amp-* placeholder inside non-amp element', () => {
+    const stub1 = sandbox.stub(resources, 'schedule_');
+
+    const insidePlaceholder1 = createElementWithResource(4)[0];
+    const placeholder1 = document.createElement('div');
+    child0.getElementsByClassName = () => [insidePlaceholder1];
+    child0.getPlaceholder = () => placeholder1;
+
+    resources.schedulePreload(parent, children);
+    expect(stub1.called).to.be.true;
+    expect(stub1.callCount).to.be.equal(3);
+  });
+});
+
+
 describe('Resources discoverWork', () => {
 
   function createElement(rect) {
@@ -344,6 +491,11 @@ describe('Resources discoverWork', () => {
       prerenderAllowed: () => true,
       renderOutsideViewport: () => true,
       isRelayoutNeeded: () => true,
+      pauseCallback: () => {},
+      unlayoutCallback: () => true,
+      unlayoutOnPause: () => true,
+      togglePlaceholder: () => sandbox.spy(),
+      getPriority: () => 1,
     };
   }
 
@@ -505,6 +657,52 @@ describe('Resources discoverWork', () => {
     expect(resource2MeasureStub.callCount).to.equal(2);
     expect(resource2UnloadStub.callCount).to.equal(1);
   });
+
+  it('should eject stale tasks when element unloaded', () => {
+    resources.visible_ = true;
+    // Don't resolve layout - immulating DOM being removed and load
+    // promise not resolving.
+    resource2.layoutCallback = new Promise(unusedResolve => {});
+    resource2.unlayoutCallback = () => true;
+    resource2.prerenderAllowed = () => false;
+
+    resource1.layoutCallback = new Promise(unusedResolve => {});
+    resource1.unlayoutCallback = () => true;
+
+    sandbox.stub(resources.viewer_, 'getVisibilityState').returns(
+        VisibilityState.VISIBLE
+    );
+    viewportMock.expects('getRect').returns(
+        layoutRectLtwh(0, 0, 300, 400)).atLeast(1);
+
+    resources.discoverWork_();
+    expect(resources.queue_.getSize()).to.equal(2);
+    expect(resources.queue_.tasks_[0].resource).to.equal(resource1);
+    expect(resources.queue_.tasks_[1].resource).to.equal(resource2);
+
+    resources.work_();
+    expect(resources.exec_.getSize()).to.equal(2);
+
+    // Remove unloaded resources from exec queue.
+    resource2.unload();
+    resources.cleanupTasks_(resource2);
+    expect(resources.exec_.getSize()).to.equal(1);
+
+    // Shouldn't remove tasks if the resource is not unloaded.
+    resources.cleanupTasks_(resource1);
+    expect(resources.exec_.getSize()).to.equal(1);
+
+    // Can successfully reschedules unloaded elements.
+    resources.discoverWork_();
+    expect(resources.queue_.getSize()).to.equal(1);
+    expect(resources.queue_.tasks_[0].resource).to.equal(resource2);
+
+    // Removes them even from scheduling queue.
+    resource2.unload();
+    resources.cleanupTasks_(resource2);
+    expect(resources.queue_.getSize()).to.equal(0);
+  });
+
 });
 
 
@@ -528,12 +726,17 @@ describe('Resources changeSize', () => {
       viewportCallback: sandbox.spy(),
       prerenderAllowed: () => true,
       renderOutsideViewport: () => false,
+      unlayoutCallback: () => true,
+      pauseCallback: () => {},
+      unlayoutOnPause: () => true,
       isRelayoutNeeded: () => true,
       contains: unused_otherElement => false,
       updateLayoutBox: () => {},
+      togglePlaceholder: () => sandbox.spy(),
       overflowCallback:
           (unused_overflown, unused_requestedHeight, unused_requestedWidth) => {
           },
+      getPriority: () => 0,
     };
   }
 
@@ -592,6 +795,16 @@ describe('Resources changeSize', () => {
     expect(resources.requestsChangeSize_[0].newHeight).to.equal(111);
     expect(resources.requestsChangeSize_[0].newWidth).to.be.undefined;
     expect(resources.requestsChangeSize_[0].force).to.equal(false);
+  });
+
+  it('should remove request change size for unloaded resources', () => {
+    resources.scheduleChangeSize_(resource1, 111, undefined, false);
+    resources.scheduleChangeSize_(resource2, 111, undefined, false);
+    expect(resources.requestsChangeSize_.length).to.equal(2);
+    resource1.unload();
+    resources.cleanupTasks_(resource1);
+    expect(resources.requestsChangeSize_.length).to.equal(1);
+    expect(resources.requestsChangeSize_[0].resource).to.equal(resource2);
   });
 
   it('should schedule width only size change', () => {
@@ -879,9 +1092,13 @@ describe('Resources changeSize', () => {
 
 describe('Resources mutateElement', () => {
 
-  function createElement(rect) {
+  function createElement(rect, isAmp) {
     return {
-      tagName: 'amp-test',
+      tagName: isAmp ? 'amp-test' : 'div',
+      classList: {
+        contains: className => isAmp && className == '-amp-element',
+      },
+      getElementsByClassName: () => [],
       isBuilt: () => {
         return true;
       },
@@ -901,11 +1118,18 @@ describe('Resources mutateElement', () => {
       contains: unused_otherElement => false,
       updateLayoutBox: () => {},
       overflowCallback: (unused_overflown, unused_requestedHeight) => {},
+      unlayoutOnPause: () => false,
+      pauseCallback: () => {},
+      unlayoutCallback: () => {},
+      getPriority: () => 0,
     };
   }
 
   function createResource(id, rect) {
-    const resource = new Resource(id, createElement(rect), resources);
+    const resource = new Resource(
+        id,
+        createElement(rect, /* isAmp */ true),
+        resources);
     resource.element['__AMP__RESOURCE'] = resource;
     resource.state_ = ResourceState_.READY_FOR_LAYOUT;
     resource.layoutBox_ = rect;
@@ -949,8 +1173,10 @@ describe('Resources mutateElement', () => {
     resource1RequestMeasureStub = sandbox.stub(resource1, 'requestMeasure');
     resource2RequestMeasureStub = sandbox.stub(resource2, 'requestMeasure');
 
-    parent1 = createElement(layoutRectLtwh(10, 10, 100, 100));
-    parent2 = createElement(layoutRectLtwh(10, 1010, 100, 100));
+    parent1 = createElement(layoutRectLtwh(10, 10, 100, 100),
+        /* isAmp */ false);
+    parent2 = createElement(layoutRectLtwh(10, 1010, 100, 100),
+        /* isAmp */ false);
 
     parent1.getElementsByClassName = className => {
       if (className == '-amp-element') {
@@ -973,6 +1199,22 @@ describe('Resources mutateElement', () => {
     const mutateSpy = sandbox.spy();
     const promise = resources.mutateElement(parent1, () => {
       parent1.getBoundingClientRect = () => layoutRectLtwh(0, 0, 0, 0);
+      mutateSpy();
+    });
+    return promise.then(() => {
+      expect(mutateSpy.callCount).to.equal(1);
+      expect(resource1RequestMeasureStub.callCount).to.equal(1);
+      expect(resource2RequestMeasureStub.callCount).to.equal(0);
+      expect(relayoutTopStub.callCount).to.equal(1);
+      expect(relayoutTopStub.getCall(0).args[0]).to.equal(10);
+    });
+  });
+
+  it('should mutate from visible to invisible on itself', () => {
+    const mutateSpy = sandbox.spy();
+    const promise = resources.mutateElement(resource1.element, () => {
+      resource1.element.getBoundingClientRect =
+          () => layoutRectLtwh(0, 0, 0, 0);
       mutateSpy();
     });
     return promise.then(() => {
@@ -1098,6 +1340,8 @@ describe('Resources.Resource', () => {
       pauseCallback: () => false,
       resumeCallback: () => false,
       viewportCallback: () => {},
+      togglePlaceholder: () => sandbox.spy(),
+      getPriority: () => 2,
     };
     elementMock = sandbox.mock(element);
 
@@ -1528,6 +1772,7 @@ describe('Resources.Resource', () => {
         () => {
           resource.state_ = ResourceState_.LAYOUT_COMPLETE;
           elementMock.expects('unlayoutCallback').returns(true).once();
+          elementMock.expects('togglePlaceholder').withArgs(true).once();
           resource.unlayout();
           expect(resource.getState()).to.equal(ResourceState_.NOT_LAID_OUT);
         });
@@ -1535,6 +1780,7 @@ describe('Resources.Resource', () => {
     it('updated state should bypass isRelayoutNeeded', () => {
       resource.state_ = ResourceState_.LAYOUT_COMPLETE;
       elementMock.expects('unlayoutCallback').returns(true).once();
+      elementMock.expects('togglePlaceholder').withArgs(true).once();
       elementMock.expects('isUpgraded').returns(true).atLeast(1);
       elementMock.expects('getBoundingClientRect')
           .returns({left: 1, top: 1, width: 1, height: 1}).once();
@@ -1549,6 +1795,7 @@ describe('Resources.Resource', () => {
         ' but NOT update state', () => {
       resource.state_ = ResourceState_.LAYOUT_COMPLETE;
       elementMock.expects('unlayoutCallback').returns(false).once();
+      elementMock.expects('togglePlaceholder').withArgs(true).never();
       resource.unlayout();
       expect(resource.getState()).to.equal(ResourceState_.LAYOUT_COMPLETE);
     });
@@ -1570,6 +1817,7 @@ describe('Resources.Resource', () => {
     it('should delegate unload to unlayoutCallback', () => {
       resource.state_ = ResourceState_.LAYOUT_COMPLETE;
       elementMock.expects('unlayoutCallback').returns(false).once();
+      elementMock.expects('togglePlaceholder').withArgs(true).never();
       resource.unload();
       expect(resource.getState()).to.equal(ResourceState_.LAYOUT_COMPLETE);
     });
@@ -1679,5 +1927,594 @@ describe('Resources.Resource', () => {
       expect(resources.getResourcesInViewport(false).length).to.equal(1);
       expect(resources.getResourcesInViewport(true).length).to.equal(0);
     });
+  });
+});
+
+describe('Resource renderOutsideViewport', () => {
+  let sandbox;
+  let element;
+  let elementMock;
+  let resources;
+  let resource;
+  let viewport;
+
+  beforeEach(() => {
+    sandbox = sinon.sandbox.create();
+
+    element = {
+      tagName: 'AMP-AD',
+      isBuilt: () => false,
+      isUpgraded: () => false,
+      prerenderAllowed: () => false,
+      renderOutsideViewport: () => true,
+      build: unused_force => false,
+      getBoundingClientRect: () => null,
+      updateLayoutBox: () => {},
+      isRelayoutNeeded: () => false,
+      layoutCallback: () => {},
+      changeSize: () => {},
+      unlayoutOnPause: () => false,
+      unlayoutCallback: () => true,
+      pauseCallback: () => false,
+      resumeCallback: () => false,
+      viewportCallback: () => {},
+      getPriority: () => 0,
+    };
+    elementMock = sandbox.mock(element);
+
+    resources = new Resources(window);
+    resource = new Resource(1, element, resources);
+    viewport = resources.viewport_;
+    sandbox.stub(viewport, 'getRect').returns(layoutRectLtwh(0, 0, 100, 100));
+  });
+
+  afterEach(() => {
+    elementMock.verify();
+    sandbox.restore();
+  });
+
+
+  describe('boolean API', () => {
+    describe('when element returns true', () => {
+      beforeEach(() => {
+        elementMock.expects('renderOutsideViewport').returns(true).once();
+      });
+
+      describe('when element is inside viewport', () => {
+        it('should allow rendering when bottom falls outside', () => {
+          resource.layoutBox_ = layoutRectLtwh(0, 10, 100, 100);
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when top falls outside', () => {
+          resource.layoutBox_ = layoutRectLtwh(0, -10, 100, 100);
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+
+      describe('when element is just below viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, 110, 100, 100);
+        });
+
+        it('should allow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling away', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+
+      describe('when element is marginally below viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, 250, 100, 100);
+        });
+
+        it('should allow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling away', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+
+      describe('when element is wayyy below viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, 1000, 100, 100);
+        });
+
+        it('should allow rendering', () => {
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling away', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+
+      describe('when element is just above viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, -10, 100, 100);
+        });
+
+        it('should allow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling away', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+
+      describe('when element is marginally above viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, -250, 100, 100);
+        });
+
+        it('should allow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling away', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+
+      describe('when element is wayyy above viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, -1000, 100, 100);
+        });
+
+        it('should allow rendering', () => {
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+
+        it('should allow rendering when scrolling away', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(true);
+        });
+      });
+    });
+
+    describe('when element returns false', () => {
+      beforeEach(() => {
+        elementMock.expects('renderOutsideViewport').returns(false).once();
+      });
+
+      describe('when element is inside viewport', () => {
+        it('should allow rendering when bottom falls outside', () => {
+          resource.layoutBox_ = layoutRectLtwh(0, 10, 100, 100);
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should allow rendering when top falls outside', () => {
+          resource.layoutBox_ = layoutRectLtwh(0, -10, 100, 100);
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+
+      describe('when element is just below viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, 110, 100, 100);
+        });
+
+        it('should disallow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling away', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+
+      describe('when element is marginally below viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, 250, 100, 100);
+        });
+
+        it('should disallow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling away', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+
+      describe('when element is wayyy below viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, 1000, 100, 100);
+        });
+
+        it('should disallow rendering', () => {
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling away', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+
+      describe('when element is just above viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, -10, 100, 100);
+        });
+
+        it('should disallow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling away', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+
+      describe('when element is marginally above viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, -250, 100, 100);
+        });
+
+        it('should disallow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling away', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+
+      describe('when element is wayyy above viewport', () => {
+        beforeEach(() => {
+          resource.layoutBox_ = layoutRectLtwh(0, -1000, 100, 100);
+        });
+
+        it('should disallow rendering', () => {
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling towards', () => {
+          resources.lastVelocity_ = -2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+
+        it('should disallow rendering when scrolling away', () => {
+          resources.lastVelocity_ = 2;
+          expect(resource.renderOutsideViewport()).to.equal(false);
+        });
+      });
+    });
+  });
+
+  describe('number API', () => {
+    beforeEach(() => {
+      elementMock.expects('renderOutsideViewport').returns(3).once();
+    });
+
+    describe('when element is inside viewport', () => {
+      it('should allow rendering when bottom falls outside', () => {
+        resource.layoutBox_ = layoutRectLtwh(0, 10, 100, 100);
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+
+      it('should allow rendering when top falls outside', () => {
+        resource.layoutBox_ = layoutRectLtwh(0, -10, 100, 100);
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+    });
+
+    describe('when element is just below viewport', () => {
+      beforeEach(() => {
+        resource.layoutBox_ = layoutRectLtwh(0, 110, 100, 100);
+      });
+
+      it('should allow rendering when scrolling towards', () => {
+        resources.lastVelocity_ = 2;
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+
+      it('should allow rendering when scrolling away', () => {
+        resources.lastVelocity_ = -2;
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+    });
+
+    describe('when element is marginally below viewport', () => {
+      beforeEach(() => {
+        resource.layoutBox_ = layoutRectLtwh(0, 250, 100, 100);
+      });
+
+      it('should allow rendering when scrolling towards', () => {
+        resources.lastVelocity_ = 2;
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+
+      it('should disallow rendering when scrolling away', () => {
+        resources.lastVelocity_ = -2;
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+    });
+
+    describe('when element is wayyy below viewport', () => {
+      beforeEach(() => {
+        resource.layoutBox_ = layoutRectLtwh(0, 1000, 100, 100);
+      });
+
+      it('should disallow rendering', () => {
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+
+      it('should disallow rendering when scrolling towards', () => {
+        resources.lastVelocity_ = 2;
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+
+      it('should disallow rendering when scrolling away', () => {
+        resources.lastVelocity_ = -2;
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+    });
+
+    describe('when element is just above viewport', () => {
+      beforeEach(() => {
+        resource.layoutBox_ = layoutRectLtwh(0, -10, 100, 100);
+      });
+
+      it('should allow rendering when scrolling towards', () => {
+        resources.lastVelocity_ = -2;
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+
+      it('should allow rendering when scrolling away', () => {
+        resources.lastVelocity_ = 2;
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+    });
+
+    describe('when element is marginally above viewport', () => {
+      beforeEach(() => {
+        resource.layoutBox_ = layoutRectLtwh(0, -250, 100, 100);
+      });
+
+      it('should allow rendering when scrolling towards', () => {
+        resources.lastVelocity_ = -2;
+        expect(resource.renderOutsideViewport()).to.equal(true);
+      });
+
+      it('should disallow rendering when scrolling away', () => {
+        resources.lastVelocity_ = 2;
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+    });
+
+    describe('when element is wayyy above viewport', () => {
+      beforeEach(() => {
+        resource.layoutBox_ = layoutRectLtwh(0, -1000, 100, 100);
+      });
+
+      it('should disallow rendering', () => {
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+
+      it('should disallow rendering when scrolling towards', () => {
+        resources.lastVelocity_ = -2;
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+
+      it('should disallow rendering when scrolling away', () => {
+        resources.lastVelocity_ = 2;
+        expect(resource.renderOutsideViewport()).to.equal(false);
+      });
+    });
+  });
+});
+
+describe('Resources fix IE matchMedia', () => {
+  let sandbox;
+  let clock;
+  let windowApi, windowMock;
+  let platformMock;
+  let resources;
+  let devErrorStub;
+  let schedulePassStub;
+
+  beforeEach(() => {
+    sandbox = sinon.sandbox.create();
+    clock = sandbox.useFakeTimers();
+    resources = new Resources(window);
+    resources.relayoutAll_ = false;
+    resources.doPass_ = () => {};
+    platformMock = sandbox.mock(resources.platform_);
+    devErrorStub = sandbox.stub(dev, 'error');
+    schedulePassStub = sandbox.stub(resources, 'schedulePass');
+
+    windowApi = {
+      innerWidth: 320,
+      setInterval: () => {},
+      clearInterval: () => {},
+      matchMedia: () => {},
+    };
+    windowMock = sandbox.mock(windowApi);
+  });
+
+  afterEach(() => {
+    platformMock.verify();
+    windowMock.verify();
+    sandbox.restore();
+  });
+
+  it('should bypass polling for non-IE browsers', () => {
+    platformMock.expects('isIe').returns(false);
+    windowMock.expects('matchMedia').never();
+    windowMock.expects('setInterval').never();
+    resources.fixMediaIe_(windowApi);
+    expect(resources.relayoutAll_).to.be.true;
+    expect(devErrorStub.callCount).to.equal(0);
+    expect(schedulePassStub.callCount).to.equal(0);
+  });
+
+  it('should bypass polling when matchMedia is not broken', () => {
+    platformMock.expects('isIe').returns(true);
+    windowMock.expects('matchMedia')
+        .withExactArgs('(min-width: 320px) AND (max-width: 320px)')
+        .returns({matches: true})
+        .once();
+    windowMock.expects('setInterval').never();
+    resources.fixMediaIe_(windowApi);
+    expect(resources.relayoutAll_).to.be.true;
+    expect(devErrorStub.callCount).to.equal(0);
+    expect(schedulePassStub.callCount).to.equal(0);
+  });
+
+  it('should poll when matchMedia is wrong, but eventually succeeds', () => {
+    platformMock.expects('isIe').returns(true);
+
+    // Scheduling pass.
+    windowMock.expects('matchMedia')
+        .withExactArgs('(min-width: 320px) AND (max-width: 320px)')
+        .returns({matches: false})
+        .once();
+    const intervalId = 111;
+    let intervalCallback;
+    windowMock.expects('setInterval')
+        .withExactArgs(
+            sinon.match(arg => {
+              intervalCallback = arg;
+              return true;
+            }),
+            10
+        )
+        .returns(intervalId)
+        .once();
+
+    resources.fixMediaIe_(windowApi);
+    expect(resources.relayoutAll_).to.be.false;
+    expect(devErrorStub.callCount).to.equal(0);
+    expect(schedulePassStub.callCount).to.equal(0);
+    expect(intervalCallback).to.exist;
+    windowMock.verify();
+    windowMock./*OK*/restore();
+
+    // Second pass.
+    clock.tick(10);
+    windowMock = sandbox.mock(windowApi);
+    windowMock.expects('matchMedia')
+        .withExactArgs('(min-width: 320px) AND (max-width: 320px)')
+        .returns({matches: false})
+        .once();
+    windowMock.expects('clearInterval').never();
+    intervalCallback();
+    expect(resources.relayoutAll_).to.be.false;
+    expect(devErrorStub.callCount).to.equal(0);
+    expect(schedulePassStub.callCount).to.equal(0);
+    windowMock.verify();
+    windowMock./*OK*/restore();
+
+    // Third pass - succeed.
+    clock.tick(10);
+    windowMock = sandbox.mock(windowApi);
+    windowMock.expects('matchMedia')
+        .withExactArgs('(min-width: 320px) AND (max-width: 320px)')
+        .returns({matches: true})
+        .once();
+    windowMock.expects('clearInterval').withExactArgs(intervalId).once();
+    intervalCallback();
+    expect(resources.relayoutAll_).to.be.true;
+    expect(schedulePassStub.callCount).to.equal(1);
+    expect(devErrorStub.callCount).to.equal(0);
+    windowMock.verify();
+    windowMock./*OK*/restore();
+  });
+
+  it('should poll until times out', () => {
+    platformMock.expects('isIe').returns(true);
+
+    // Scheduling pass.
+    windowMock.expects('matchMedia')
+        .withExactArgs('(min-width: 320px) AND (max-width: 320px)')
+        .returns({matches: false})
+        .atLeast(2);
+    const intervalId = 111;
+    let intervalCallback;
+    windowMock.expects('setInterval')
+        .withExactArgs(
+            sinon.match(arg => {
+              intervalCallback = arg;
+              return true;
+            }),
+            10
+        )
+        .returns(intervalId)
+        .once();
+    windowMock.expects('clearInterval').withExactArgs(intervalId).once();
+
+    resources.fixMediaIe_(windowApi);
+    expect(resources.relayoutAll_).to.be.false;
+    expect(devErrorStub.callCount).to.equal(0);
+    expect(schedulePassStub.callCount).to.equal(0);
+    expect(intervalCallback).to.exist;
+
+    // Second pass.
+    clock.tick(10);
+    intervalCallback();
+    expect(resources.relayoutAll_).to.be.false;
+    expect(devErrorStub.callCount).to.equal(0);
+    expect(schedulePassStub.callCount).to.equal(0);
+
+    // Third pass - timeout.
+    clock.tick(2000);
+    intervalCallback();
+    expect(resources.relayoutAll_).to.be.true;
+    expect(schedulePassStub.callCount).to.equal(1);
+    expect(devErrorStub.callCount).to.equal(1);
+  });
+
+  it('should tolerate matchMedia exceptions', () => {
+    platformMock.expects('isIe').returns(true);
+
+    windowMock.expects('matchMedia')
+        .withExactArgs('(min-width: 320px) AND (max-width: 320px)')
+        .throws(new Error('intentional'))
+        .once();
+    windowMock.expects('setInterval').never();
+
+    resources.fixMediaIe_(windowApi);
+    expect(resources.relayoutAll_).to.be.true;
+    expect(devErrorStub.callCount).to.equal(1);
+    expect(schedulePassStub.callCount).to.equal(0);
   });
 });

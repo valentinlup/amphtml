@@ -185,6 +185,15 @@ describe('parseQueryString', () => {
 
 describe('assertHttpsUrl', () => {
   const referenceElement = document.createElement('div');
+  it('should NOT allow null or undefined, but allow empty string', () => {
+    expect(() => {
+      assertHttpsUrl(null, referenceElement);
+    }).to.throw(/source must be available/);
+    expect(() => {
+      assertHttpsUrl(undefined, referenceElement);
+    }).to.throw(/source must be available/);
+    assertHttpsUrl('', referenceElement);
+  });
   it('should allow https', () => {
     assertHttpsUrl('https://twitter.com', referenceElement);
   });
@@ -294,6 +303,16 @@ describe('addParamToUrl', () => {
     expect(url).to.equal('https://www.ampproject.org/get/here?hello=world&foo=bar&elementId=n1');
     url = addParamToUrl(url, 'ampUserId', '12345');
     expect(url).to.equal('https://www.ampproject.org/get/here?hello=world&foo=bar&elementId=n1&ampUserId=12345');
+  });
+
+  it('should optionally add params to the front', () => {
+    let url = addParamToUrl('https://www.ampproject.org/get/here?hello=world&foo=bar',
+        'elementId', 'n1', /* addToFront */ true);
+    expect(url).to.equal('https://www.ampproject.org/get/here?elementId=n1&hello=world&foo=bar');
+
+    url = addParamToUrl('https://www.ampproject.org/get/here',
+        'elementId', 'n1', /* addToFront */ true);
+    expect(url).to.equal('https://www.ampproject.org/get/here?elementId=n1');
   });
 
   it('should encode uri values', () => {

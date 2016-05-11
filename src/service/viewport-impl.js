@@ -244,7 +244,8 @@ export class Viewport {
    * @return {!LayoutRect}
    */
   getLayoutRect(el) {
-    return this.binding_.getLayoutRect(el);
+    return this.binding_.getLayoutRect(el,
+        this.getScrollLeft(), this.getScrollTop());
   }
 
   /**
@@ -397,7 +398,7 @@ export class Viewport {
    * @private
    */
   getViewportMeta_() {
-    if (this.viewer_.isEmbedded()) {
+    if (this.viewer_.isIframed()) {
       // An embedded document does not control its viewport meta tag.
       return null;
     }
@@ -577,9 +578,13 @@ class ViewportBindingDef {
   /**
    * Returns the rect of the element within the document.
    * @param {!Element} unusedEl
+   * @param {number=} unusedScrollLeft Optional arguments that the caller may
+   *     pass in, if they cached these values and would like to avoid
+   *     remeasure. Requires appropriate updating the values on scroll.
+   * @param {number=} unusedScrollTop Same comment as above.
    * @return {!LayoutRect}
    */
-  getLayoutRect(unusedEl) {}
+  getLayoutRect(unusedEl, unusedScrollLeft, unusedScrollTop) {}
 
   /** For testing. */
   cleanup_() {}
@@ -649,15 +654,14 @@ export class ViewportBindingNatural_ {
 
   /** @override */
   getSize() {
-    // Notice, that documentElement./*OK*/clientHeight is buggy on iOS Safari
-    // and thus cannot be used. But when the values are undefined, fallback to
-    // documentElement./*OK*/clientHeight.
-    if (platform.isIos() && !platform.isChrome()) {
-      const winWidth = this.win./*OK*/innerWidth;
-      const winHeight = this.win./*OK*/innerHeight;
-      if (winWidth && winHeight) {
-        return {width: winWidth, height: winHeight};
-      }
+    // Prefer window innerWidth/innerHeight but fall back to
+    // documentElement clientWidth/clientHeight.
+    // documentElement./*OK*/clientHeight is buggy on iOS Safari
+    // and thus cannot be used.
+    const winWidth = this.win./*OK*/innerWidth;
+    const winHeight = this.win./*OK*/innerHeight;
+    if (winWidth && winHeight) {
+      return {width: winWidth, height: winHeight};
     }
     const el = this.win.document.documentElement;
     return {width: el./*OK*/clientWidth, height: el./*OK*/clientHeight};
@@ -686,9 +690,13 @@ export class ViewportBindingNatural_ {
   }
 
   /** @override */
-  getLayoutRect(el) {
-    const scrollTop = this.getScrollTop();
-    const scrollLeft = this.getScrollLeft();
+  getLayoutRect(el, opt_scrollLeft, opt_scrollTop) {
+    const scrollTop = opt_scrollTop != undefined
+        ? opt_scrollTop
+        : this.getScrollTop();
+    const scrollLeft = opt_scrollLeft != undefined
+        ? opt_scrollLeft
+        : this.getScrollLeft();
     const b = el./*OK*/getBoundingClientRect();
     return layoutRectLtwh(Math.round(b.left + scrollLeft),
         Math.round(b.top + scrollTop),
@@ -799,6 +807,7 @@ export class ViewportBindingNaturalIosEmbed_ {
       webkitOverflowScrolling: 'touch',
     });
     setStyles(documentBody, {
+      overflowX: 'hidden',
       overflowY: 'auto',
       webkitOverflowScrolling: 'touch',
       position: 'absolute',

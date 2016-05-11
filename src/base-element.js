@@ -58,6 +58,7 @@ import {vsyncFor} from './vsync';
  *    State: <NOT BUILT>
  *           ||
  *           || buildCallback
+ *           || !getPlaceholder() => createPlaceholderCallback
  *           || preconnectCallback may be called N times after this.
  *           || pauseCallback may be called N times after this.
  *           || resumeCallback may be called N times after this.
@@ -94,6 +95,11 @@ import {vsyncFor} from './vsync';
  * and swipes back. In these situations, any paused media may begin playing
  * again, if user interaction is not required.
  * TODO(jridgewell) slide slides into view
+ *
+ * The createPlaceholderCallback is called if AMP didn't detect a provided
+ * placeholder for the element, subclasses can override this to build and
+ * return a dynamically created placeholder that AMP would append to the
+ * element.
  *
  * The unlayoutCallback is called when the document becomes inactive, e.g.
  * when the user swipes away from the document, or another tab is focused.
@@ -132,6 +138,16 @@ export class BaseElement {
 
     /** @private {!Resources}  */
     this.resources_ = resourcesFor(this.getWin());
+  }
+
+  /**
+  * This is the priority of loading elements (layoutCallback).
+  * The lower the number, the higher the priority.
+  * The default priority for base elements is 0.
+  * @return {number}
+  */
+  getPriority() {
+    return 0;
   }
 
   /** @return {!Layout} */
@@ -259,12 +275,26 @@ export class BaseElement {
   }
 
   /**
+   * Subclasses can override this method to create a dynamic placeholder
+   * element and return it to be appended to the element. This will only
+   * be called if the element doesn't already have a placeholder.
+   * @returns {?Element}
+   */
+  createPlaceholderCallback() {
+    return null;
+  }
+
+  /**
    * Subclasses can override this method to opt-out of rendering the element
    * when it is not currently visible.
-   * @return {boolean}
+   * Returning a boolean allows or prevents rendering outside the viewport at
+   * any distance, while returning a positive number allows rendering only when
+   * the element is within X viewports of the current viewport. Returning a
+   * zero causes the element to only render inside the viewport.
+   * @return {boolean|number}
    */
   renderOutsideViewport() {
-    return true;
+    return 3;
   }
 
   /**

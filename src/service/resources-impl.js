@@ -16,7 +16,6 @@
 
 import {FocusHistory} from '../focus-history';
 import {Pass} from '../pass';
-import {assert} from '../asserts';
 import {closest} from '../dom';
 import {onDocumentReady} from '../document-ready';
 import {
@@ -33,7 +32,9 @@ import {installFramerateService} from './framerate-impl';
 import {installViewerService, VisibilityState} from './viewer-impl';
 import {installViewportService} from './viewport-impl';
 import {installVsyncService} from './vsync-impl';
+import {platformFor} from '../platform';
 import {FiniteStateMachine} from '../finite-state-machine';
+import {isArray} from '../types';
 
 
 const TAG_ = 'Resources';
@@ -50,30 +51,16 @@ const MUTATE_DEFER_DELAY_ = 500;
 const FOCUS_HISTORY_TIMEOUT_ = 1000 * 60;  // 1min
 const FOUR_FRAME_DELAY_ = 70;
 
-/**
- * Returns the element-based priority. A value from 0 to 10.
- * @param {string} tagName
- * @return {number}
- */
-export function getElementPriority(tagName) {
-  tagName = tagName.toLowerCase();
-  if (tagName == 'amp-ad') {
-    return 2;
-  }
-  if (tagName == 'amp-pixel' || tagName == 'amp-analytics') {
-    return 1;
-  }
-  return 0;
-}
-
-
 export class Resources {
   constructor(window) {
     /** @const {!Window} */
     this.win = window;
 
-    /** @const {!Viewer} */
+    /** @const @private {!Viewer} */
     this.viewer_ = installViewerService(window);
+
+    /** @const @private {!Platform} */
+    this.platform_ = platformFor(window);
 
     /** @private {boolean} */
     this.isRuntimeOn_ = this.viewer_.isRuntimeOn();
@@ -102,6 +89,12 @@ export class Resources {
      * @private {boolean}
      */
     this.firstPassAfterDocumentReady_ = true;
+
+    /**
+     * We also adjust the timeout penalty shortly after the first pass.
+     * @private {number}
+     */
+    this.firstVisibleTime_ = -1;
 
     /** @private {boolean} */
     this.relayoutAll_ = true;
@@ -187,6 +180,9 @@ export class Resources {
     // When document becomes visible, e.g. from "prerender" mode, do a
     // simple pass.
     this.viewer_.onVisibilityChanged(() => {
+      if (this.firstVisibleTime_ == -1 && this.viewer_.isVisible()) {
+        this.firstVisibleTime_ = timer.now();
+      }
       this.schedulePass();
     });
 
@@ -204,12 +200,61 @@ export class Resources {
     onDocumentReady(this.win.document, () => {
       this.documentReady_ = true;
       this.forceBuild_ = true;
-      this.relayoutAll_ = true;
+      if (this.platform_.isIe()) {
+        this.fixMediaIe_(this.win);
+      } else {
+        this.relayoutAll_ = true;
+      }
       this.schedulePass();
       this.monitorInput_();
     });
 
     this.schedulePass();
+  }
+
+  /**
+   * An ugly fix for IE's problem with `matchMedia` API, where media queries
+   * are evaluated incorrectly. See #2577 for more details.
+   * @param {!Window} win
+   * @private
+   */
+  fixMediaIe_(win) {
+    if (!this.platform_.isIe() || this.matchMediaIeQuite_(win)) {
+      this.relayoutAll_ = true;
+      return;
+    }
+
+    // Poll until the expression resolves correctly, but only up to a point.
+    const endTime = timer.now() + 2000;
+    const interval = win.setInterval(() => {
+      const now = timer.now();
+      const matches = this.matchMediaIeQuite_(win);
+      if (matches || now > endTime) {
+        win.clearInterval(interval);
+        this.relayoutAll_ = true;
+        this.schedulePass();
+        if (!matches) {
+          dev.error(TAG_, 'IE media never resolved');
+        }
+      }
+    }, 10);
+  }
+
+  /**
+   * @param {!Window} win
+   * @return {boolean}
+   * @private
+   */
+  matchMediaIeQuite_(win) {
+    const q = `(min-width: ${win./*OK*/innerWidth}px)` +
+        ` AND (max-width: ${win./*OK*/innerWidth}px)`;
+    try {
+      return win.matchMedia(q).matches;
+    } catch (e) {
+      dev.error(TAG_, 'IE matchMedia failed: ', e);
+      // Return `true` to avoid polling on a broken API.
+      return true;
+    }
   }
 
   /**
@@ -304,8 +349,27 @@ export class Resources {
    * @package
    */
   getResourceForElement(element) {
-    return assert(/** @type {!Resource} */ (element[RESOURCE_PROP_]),
+    return dev.assert(/** @type {!Resource} */ (element[RESOURCE_PROP_]),
         'Missing resource prop on %s', element);
+  }
+
+  /**
+   * Returns the viewport instance
+   * @return {!Viewport}
+   */
+  getViewport() {
+    return this.viewport_;
+  }
+
+  /**
+   * Returns the direction the user last scrolled.
+   *  - -1 for scrolling up
+   *  - 1 for scrolling down
+   *  - Defaults to 1
+   * @return {number}
+   */
+  getScrollDirection() {
+    return Math.sign(this.lastVelocity_) || 1;
   }
 
   /**
@@ -371,7 +435,7 @@ export class Resources {
    * @package
    */
   setOwner(element, owner) {
-    assert(owner.contains(element), 'Owner must contain the element');
+    dev.assert(owner.contains(element), 'Owner must contain the element');
     element[OWNER_PROP_] = owner;
   }
 
@@ -514,7 +578,11 @@ export class Resources {
       mutate: () => {
         mutator();
 
-        // Mark children for re-measurement.
+        // Mark itself and children for re-measurement.
+        if (element.classList.contains('-amp-element')) {
+          const r = this.getResourceForElement(element);
+          r.requestMeasure();
+        }
         const ampElements = element.getElementsByClassName('-amp-element');
         for (let i = 0; i < ampElements.length; i++) {
           const r = this.getResourceForElement(ampElements[i]);
@@ -845,7 +913,10 @@ export class Resources {
     // Unload all in one cycle.
     if (toUnload.length > 0) {
       this.vsync_.mutate(() => {
-        toUnload.forEach(r => r.unload());
+        toUnload.forEach(r => {
+          r.unload();
+          this.cleanupTasks_(r);
+        });
       });
     }
 
@@ -934,54 +1005,54 @@ export class Resources {
     const visibility = this.viewer_.getVisibilityState();
 
     const scorer = this.calcTaskScore_.bind(this, this.viewport_.getRect(),
-        Math.sign(this.lastVelocity_));
+        this.getScrollDirection());
 
     let timeout = -1;
     let task = this.queue_.peek(scorer);
-    if (task) {
-      do {
-        timeout = this.calcTaskTimeout_(task);
-        dev.fine(TAG_, 'peek from queue:', task.id,
-            'sched at', task.scheduleTime,
-            'score', scorer(task),
-            'timeout', timeout);
-        if (timeout > 16) {
-          break;
-        }
+    while (task) {
+      timeout = this.calcTaskTimeout_(task);
+      dev.fine(TAG_, 'peek from queue:', task.id,
+          'sched at', task.scheduleTime,
+          'score', scorer(task),
+          'timeout', timeout);
+      if (timeout > 16) {
+        break;
+      }
 
-        this.queue_.dequeue(task);
+      this.queue_.dequeue(task);
 
-        // Do not override a task in execution. This task will have to wait
-        // until the current one finished the execution.
-        const executing = this.exec_.getTaskById(task.id);
-        if (!executing) {
-          task.promise = task.callback(visibility);
-          task.startTime = now;
-          dev.fine(TAG_, 'exec:', task.id, 'at', task.startTime);
-          this.exec_.enqueue(task);
-          task.promise.then(this.taskComplete_.bind(this, task, true),
-              this.taskComplete_.bind(this, task, false))
-              .catch(reportError);
-        } else {
-          // Reschedule post execution.
-          executing.promise.then(this.reschedule_.bind(this, task),
-              this.reschedule_.bind(this, task));
-        }
+      // Do not override a task in execution. This task will have to wait
+      // until the current one finished the execution.
+      const executing = this.exec_.getTaskById(task.id);
+      if (executing) {
+        // Reschedule post execution.
+        const reschedule = this.reschedule_.bind(this, task);
+        executing.promise.then(reschedule, reschedule);
+      } else {
+        task.promise = task.callback(visibility);
+        task.startTime = now;
+        dev.fine(TAG_, 'exec:', task.id, 'at', task.startTime);
+        this.exec_.enqueue(task);
+        task.promise.then(this.taskComplete_.bind(this, task, true),
+            this.taskComplete_.bind(this, task, false))
+            .catch(reportError);
+      }
 
-        task = this.queue_.peek(scorer);
-        timeout = -1;
-      } while (task);
+      task = this.queue_.peek(scorer);
+      timeout = -1;
     }
 
     dev.fine(TAG_, 'queue size:', this.queue_.getSize());
     dev.fine(TAG_, 'exec size:', this.exec_.getSize());
 
     if (timeout >= 0) {
-      // Work pass.
+      // Still tasks in the queue, but we took too much time.
+      // Schedule the next work pass.
       return timeout;
     }
 
-    // Idle pass.
+    // No tasks left in the queue.
+    // Schedule the next idle pass.
     let nextPassDelay = (now - this.exec_.getLastDequeueTime()) * 2;
     nextPassDelay = Math.max(Math.min(30000, nextPassDelay), 5000);
     return nextPassDelay;
@@ -1037,11 +1108,22 @@ export class Resources {
    * @private
    */
   calcTaskTimeout_(task) {
+    const now = timer.now();
+
     if (this.exec_.getSize() == 0) {
-      return 0;
+      // If we've never been visible, return 0. This follows the previous
+      // behavior of not delaying tasks when there's nothing to do.
+      if (this.firstVisibleTime_ === -1) {
+        return 0;
+      }
+
+      // Scale off the first visible time, so penalized tasks must wait a
+      // second or two to run. After we have been visible for a time, we no
+      // longer have to wait.
+      const penalty = task.priority * PRIORITY_PENALTY_TIME_;
+      return Math.max(penalty - (now - this.firstVisibleTime_), 0);
     }
 
-    const now = timer.now();
     let timeout = 0;
     this.exec_.forEach(other => {
       // Higher priority tasks get the head start. Currently 500ms per a drop
@@ -1148,7 +1230,7 @@ export class Resources {
    * @private
    */
   scheduleLayoutOrPreload_(resource, layout, opt_parentPriority) {
-    assert(resource.getState() != ResourceState_.NOT_BUILT &&
+    dev.assert(resource.getState() != ResourceState_.NOT_BUILT &&
         resource.isDisplayed(),
         'Not ready for layout: %s (%s)',
         resource.debugid, resource.getState());
@@ -1216,7 +1298,7 @@ export class Resources {
    * @private
    */
   schedule_(resource, localId, priorityOffset, parentPriority, callback) {
-    const taskId = resource.debugid + '#' + localId;
+    const taskId = resource.getTaskId(localId);
 
     const task = {
       id: taskId,
@@ -1266,7 +1348,7 @@ export class Resources {
    */
   discoverResourcesForArray_(parentResource, elements, callback) {
     elements.forEach(element => {
-      assert(parentResource.element.contains(element));
+      dev.assert(parentResource.element.contains(element));
       this.discoverResourcesForElement_(element, callback);
     });
   }
@@ -1279,6 +1361,11 @@ export class Resources {
     // Breadth-first search.
     if (element.classList.contains('-amp-element')) {
       callback(this.getResourceForElement(element));
+      // Also schedule amp-element that is a placeholder for the element.
+      const placeholder = element.getPlaceholder();
+      if (placeholder) {
+        this.discoverResourcesForElement_(placeholder, callback);
+      }
     } else {
       const ampElements = element.getElementsByClassName('-amp-element');
       const seen = [];
@@ -1337,7 +1424,11 @@ export class Resources {
       this.resources_.forEach(r => r.pause());
     };
     const unload = () => {
-      this.resources_.forEach(r => r.unload());
+      this.resources_.forEach(r => {
+        r.unload();
+        this.cleanupTasks_(r);
+      });
+      this.unselectText();
     };
     const resume = () => {
       this.resources_.forEach(r => r.resume());
@@ -1369,6 +1460,40 @@ export class Resources {
     vsm.addTransition(paused, hidden, doPass);
     vsm.addTransition(paused, inactive, unload);
     vsm.addTransition(paused, paused, noop);
+  }
+
+  /**
+   * Unselects any selected text
+   */
+  unselectText() {
+    try {
+      this.win.getSelection().removeAllRanges();
+    } catch (e) {
+      // Selection API not supported.
+    }
+  }
+
+  /**
+   * Cleanup task queues from tasks for elements that has been unloaded.
+   * @param resource
+   * @private
+   */
+  cleanupTasks_(resource) {
+    if (resource.getState() == ResourceState_.NOT_LAID_OUT) {
+      // If the layout promise for this resource has not resolved yet, remove
+      // it from the task queues to make sure this resource can be rescheduled
+      // for layout again later on.
+      // TODO(mkhatib): Think about how this might affect preload tasks once the
+      // prerender change is in.
+      this.queue_.purge(task => {
+        return task.resource == resource;
+      });
+      this.exec_.purge(task => {
+        return task.resource == resource;
+      });
+      this.requestsChangeSize_ = this.requestsChangeSize_.filter(
+          request => request.resource != resource);
+    }
   }
 }
 
@@ -1403,9 +1528,6 @@ export class Resource {
 
     /** @const {!AmpElement|undefined|null} */
     this.owner_ = undefined;
-
-    /** @const {number} */
-    this.priority_ = getElementPriority(element.tagName);
 
     /** @private {!ResourceState_} */
     this.state_ = element.isBuilt() ? ResourceState_.NOT_LAID_OUT :
@@ -1492,7 +1614,7 @@ export class Resource {
    * @return {number}
    */
   getPriority() {
-    return this.priority_;
+    return this.element.getPriority();
   }
 
   /**
@@ -1685,7 +1807,41 @@ export class Resource {
    * @return {boolean}
    */
   renderOutsideViewport() {
-    return this.element.renderOutsideViewport();
+    const renders = this.element.renderOutsideViewport();
+    // Boolean interface, element is either always allowed or never allowed to
+    // render outside viewport.
+    if (renders === true || renders === false) {
+      return renders;
+    }
+    // Numeric interface, element is allowed to render outside viewport when it
+    // is within X times the viewport height of the current viewport.
+    const viewportBox = this.resources_.getViewport().getRect();
+    const layoutBox = this.layoutBox_;
+    const scrollDirection = this.resources_.getScrollDirection();
+    const multipler = Math.max(renders, 0);
+    let scrollPenalty = 1;
+    let distance;
+    if (viewportBox.bottom < layoutBox.top) {
+      // Element is below viewport
+      distance = layoutBox.top - viewportBox.bottom;
+
+      // If we're scrolling away from the element
+      if (scrollDirection == -1) {
+        scrollPenalty = 2;
+      }
+    } else if (viewportBox.top > layoutBox.bottom) {
+      // Element is above viewport
+      distance = viewportBox.top - layoutBox.bottom;
+
+      // If we're scrolling away from the element
+      if (scrollDirection == 1) {
+        scrollPenalty = 2;
+      }
+    } else {
+      // Element is in viewport
+      return true;
+    }
+    return distance < viewportBox.height * multipler / scrollPenalty;
   }
 
   /**
@@ -1713,7 +1869,7 @@ export class Resource {
       return Promise.reject('already failed');
     }
 
-    assert(this.state_ != ResourceState_.NOT_BUILT,
+    dev.assert(this.state_ != ResourceState_.NOT_BUILT,
         'Not ready to start layout: %s (%s)', this.debugid, this.state_);
 
     if (!isDocumentVisible && !this.prerenderAllowed()) {
@@ -1723,7 +1879,7 @@ export class Resource {
       return Promise.resolve();
     }
 
-    if (!this.renderOutsideViewport() && !this.isInViewport()) {
+    if (!this.isInViewport() && !this.renderOutsideViewport()) {
       dev.fine(TAG_, 'layout canceled due to element not being in viewport:',
           this.debugid, this.state_);
       this.state_ = ResourceState_.READY_FOR_LAYOUT;
@@ -1782,6 +1938,15 @@ export class Resource {
   }
 
   /**
+   * Returns true if the resource layout has not completed or failed.
+   * @return {boolean}
+   * */
+  isLayoutPending() {
+    return this.state_ != ResourceState_.LAYOUT_COMPLETE &&
+        this.state_ != ResourceState_.LAYOUT_FAILED;
+  }
+
+  /**
    * Returns a promise that is resolved when this resource is laid out
    * for the first time and the resource was loaded.
    * @return {!Promise}
@@ -1822,9 +1987,20 @@ export class Resource {
     }
     this.setInViewport(false);
     if (this.element.unlayoutCallback()) {
+      this.element.togglePlaceholder(true);
       this.state_ = ResourceState_.NOT_LAID_OUT;
       this.layoutCount_ = 0;
+      this.layoutPromise_ = null;
     }
+  }
+
+  /**
+   * Returns the task ID for this resource.
+   * @param localId
+   * @returns {string}
+   */
+  getTaskId(localId) {
+    return this.debugid + '#' + localId;
   }
 
   /**
@@ -1868,7 +2044,7 @@ export class Resource {
    * @export
    */
   forceAll() {
-    assert(!this.resources_.isRuntimeOn_);
+    dev.assert(!this.resources_.isRuntimeOn_);
     let p = Promise.resolve();
     if (this.state_ == ResourceState_.NOT_BUILT) {
       if (!this.element.isUpgraded()) {
@@ -1966,7 +2142,7 @@ export class TaskQueue_ {
    * @param {!TaskDef} task
    */
   enqueue(task) {
-    assert(!this.taskIdMap_[task.id], 'Task already enqueued: %s', task.id);
+    dev.assert(!this.taskIdMap_[task.id], 'Task already enqueued: %s', task.id);
     this.tasks_.push(task);
     this.taskIdMap_[task.id] = task;
     this.lastEnqueueTime_ = timer.now();
@@ -1980,11 +2156,10 @@ export class TaskQueue_ {
    */
   dequeue(task) {
     const existing = this.taskIdMap_[task.id];
-    if (!existing) {
+    const dequeued = this.removeAtIndex(task, this.tasks_.indexOf(existing));
+    if (!dequeued) {
       return false;
     }
-    this.tasks_.splice(this.tasks_.indexOf(existing), 1);
-    delete this.taskIdMap_[task.id];
     this.lastDequeueTime_ = timer.now();
     return true;
   }
@@ -2016,6 +2191,36 @@ export class TaskQueue_ {
   forEach(callback) {
     this.tasks_.forEach(callback);
   }
+
+  /**
+   * Removes the task and returns "true" if dequeueing is successful. Otherwise
+   * returns "false", e.g. when this task is not currently enqueued.
+   * @param {!TaskDef} task
+   * @param {number} index of the task to remove.
+   * @return {boolean}
+   */
+  removeAtIndex(task, index) {
+    const existing = this.taskIdMap_[task.id];
+    if (!existing || this.tasks_[index] != existing) {
+      return false;
+    }
+    this.tasks_.splice(index, 1);
+    delete this.taskIdMap_[task.id];
+    return true;
+  }
+
+  /**
+   * Removes tasks in queue that pass the callback test.
+   * @param {function(!TaskDef):boolean} callback Return true to remove the task.
+   */
+  purge(callback) {
+    let index = this.tasks_.length;
+    while (index--) {
+      if (callback(this.tasks_[index])) {
+        this.removeAtIndex(this.tasks_[index], index);
+      }
+    }
+  }
 }
 
 
@@ -2024,10 +2229,7 @@ export class TaskQueue_ {
  * @return {!Array<!Element>}
  */
 function elements_(elements) {
-  if (elements.length !== undefined) {
-    return elements;
-  }
-  return [elements];
+  return isArray(elements) ? elements : [elements];
 }
 
 
